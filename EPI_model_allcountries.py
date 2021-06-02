@@ -10,6 +10,7 @@ from datetime import date
 # Easy interactive plots
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import plotly.figure_factory as ff
 
 # Interactive plots in notebook
 from IPython.display import HTML, Image, display
@@ -29,7 +30,7 @@ import pickle
 from lmfit import Model, Parameters, Parameter, report_fit, minimize
 
 #Import from utils
-from utils import country_covid
+from utils import country_covid, get_data_w_mobility
 
 
 class EPIfit_allcountries():
@@ -59,6 +60,10 @@ class EPIfit_allcountries():
         self.countries = ['Australia', 'Austria', 'Belgium', 'Bulgaria', 'Canada', 'China', 'Denmark', 'Finland', 'France', 'Germany', 'Greece', 'India',
         'Israel', 'Italy', 'Japan', 'Luxembourg', 'Netherlands', 'Norway', 'Poland', 'Portugal', 'Russia', 'South Africa', 'Korea, Republic of', 'Spain', 'Sweden',
         'Taiwan', 'United Kingdom', 'United States']
+
+        self.iso_code2 = ['AU', 'AT', 'BE', 'BG', 'CA', 'CH', 'DK', 'FI', 'FR', 'DE', 'GR', 'IN', 'IL', 'IT', 'JP', 'LU', 'NL', 'NO', 'PL', 'PT', 'RU', 'ZA',
+                     'KR', 'ES', 'SE', 'TW', 'GB', 'US']
+
         if stringency_fit:
             #List of fitted beta curve on stringency
             self.result_stringency = []
@@ -68,11 +73,11 @@ class EPIfit_allcountries():
         self.data = []
         self.recovered=[]
         self.data_s = []
+        self.data_mob=[]
         self.cases_fitted=[]
         self.derivative = []
         self.mae = []
         self.days=[]
-
         self.mse=[]
         self.test_mse=[]
         self.std_error=[]
@@ -82,9 +87,26 @@ class EPIfit_allcountries():
         self.train_params = []
         self.test_predicted=[]
         self.test_deriv=[]
+        self.test_on_optim = False
+        if self.beta_constant_step:
+            method = 'constant'
+        elif self.beta_sigmoid_step:
+            method = 'sigmoid'
+        elif self.beta_linear_step:
+            method = 'linear'
+
+        self.file_method = 'results_{}'.format(method)
+        self.file_model = model
+
+        #Create directories for future results
+        if not os.path.exists('./{}'.format(self.file_method)):
+            os.makedirs('./{}'.format(self.file_method))
+
+        if not os.path.exists('./{0}/{1}'.format(self.file_method, self.file_model)):
+            os.makedirs('./{0}/{1}'.format(self.file_method, self.file_model))
 
         #Chi2 table for 7 liberty degrees, alpha=5%
-        self.Chi2 = [(0.00,5.02),(0.05,7.38),(0.22,9.35),(0.48,11.14),(0.83,12.83), (1.24,14.45),(1.69,16.01)]
+        #self.Chi2 = [(0.00,5.02),(0.05,7.38),(0.22,9.35),(0.48,11.14),(0.83,12.83), (1.24,14.45),(1.69,16.01)]
 
 
     """Logistic functions for sigmoid fits"""
@@ -114,11 +136,24 @@ class EPIfit_allcountries():
         return C + self.logistic(t, L, a, b)
 
     @staticmethod
-    def linear_step(s, params):
+    def linear_step(s, mob, params):
         """ Trying a simple linear step to approximate beta parameter with stringency index as input
         """
-        weight, bias = params
-        return weight*s + bias
+        weight1, weight2, bias = params
+        return weight1*s + weight2*mob + bias
+
+    @staticmethod
+    def surface_beta(data_s, data_mob, weights):
+        """To plot surface plot in 3d and assess sensibility to parameters"""
+        #mat = []
+        #for x in np.linspace(-1, 1, len(france_s)):
+          #  z = weight2*x +weight1*np.linspace(0, 1, len(france_s)) + bias
+          #  mat.append(z)
+        weight1, weight2, bias = weights
+        X, Y = np.meshgrid(np.linspace(0,1,len(data_s)), np.linspace(-1,1,len(data_mob)))
+        Z = weight1*X + weight2*Y + bias
+
+        return Z
 
 
     """PLOTS"""
@@ -206,6 +241,9 @@ class EPIfit_allcountries():
     def get_strin_continuous(self, t):
         return self.stringency_country[int(np.floor(t))] + (t - np.floor(t))*(self.stringency_country[int(np.ceil(t))]-self.stringency_country[int(np.floor(t))])
 
+    def get_mob_continuous(self, t):
+        return self.mob_country[int(np.floor(t))] + (t - np.floor(t))*(self.mob_country[int(np.ceil(t))]-self.mob_country[int(np.floor(t))])
+
     """SIR, SEIR or SEIRD model"""
     def SIRD_derivs(self, z, t, rate_params, evo_params=None, stringency=None):
         """
@@ -224,11 +262,12 @@ class EPIfit_allcountries():
                 gamma = rate_params
                 beta_params = evo_params
                 #print('t sird derivs', t)
-                if t > len(self.stringency_country):
-                    t=len(self.stringency_country)-1
+                #if t > len(self.stringency_country):
+                    #t=len(self.stringency_country)-1
                 strin_continuous =  self.get_strin_continuous(t-1.0) #stringency data starts at index 0 so we remove 1
+                mob_continuous =  self.get_mob_continuous(t-1.0)
                 #print('strin_continuous', strin_continuous)
-                beta = self.linear_step(strin_continuous, beta_params)
+                beta = self.linear_step(strin_continuous, mob_continuous, beta_params)
                 #print('beta linear step', beta)
 
             elif self.beta_sigmoid_step:
@@ -258,7 +297,10 @@ class EPIfit_allcountries():
             elif self.beta_linear_step:
                 sigma, gamma = rate_params
                 beta_params = evo_params
-                beta = self.linear_step(self.stringency_country[int(t)], beta_params)
+                strin_continuous =  self.get_strin_continuous(t-1.0) #stringency data starts at index 0 so we remove 1
+                mob_continuous =  self.get_mob_continuous(t-1.0)
+                #print('strin_continuous', strin_continuous)
+                beta = self.linear_step(strin_continuous, mob_continuous, beta_params)
 
             elif self.beta_sigmoid_step:
                 sigma, gamma = rate_params
@@ -328,10 +370,10 @@ class EPIfit_allcountries():
 
             elif self.beta_linear_step:
                 gamma = params['gamma'].value
-                w, b = params[f'w_{i}'].value, params[f'b_{i}'].value
+                w1, w2, b = params[f'w1_{i}'].value, params[f'w2_{i}'].value, params[f'b_{i}'].value
                 # Static params and param lists
                 rate_params = gamma
-                beta_params = [w,b]
+                beta_params = [w1, w2, b]
                 evo_params = beta_params
                 #print('rate_params', rate_params)
                 #print('evo params', evo_params)
@@ -372,11 +414,11 @@ class EPIfit_allcountries():
                 # Make param lists
                 sigma, gamma = params['sigma'].value, params['gamma'].value
                 # beta params
-                w, b = params[f'w_{i}'].value, params[f'b_{i}'].value
+                w1, w2, b = params[f'w1_{i}'].value, params[f'w2_{i}'].value, params[f'b_{i}'].value
 
                 # Static params and param lists
                 rate_params = [sigma, gamma]
-                beta_params = [w, b]
+                beta_params = [w1, w2, b]
                 evo_params = beta_params
                 # Solve ODE
                 res =odeint(self.SIRD_derivs, [initS, initE, initI, initR], t, args=(rate_params, evo_params))
@@ -473,6 +515,34 @@ class EPIfit_allcountries():
             #print('Params for stringency fit:', params)
             return params
 
+        elif self.test_on_optim:
+            #Init conditions
+            initial_conditions = []
+
+            for i in range(len(sector_props)):
+                initN_i = initN * sector_props[i]/100
+                initI_i = initI
+                initR_i = initR
+
+                initial_conditions_i = [initI_i, initR_i, initN_i]
+                initial_conditions.append(initial_conditions_i)
+
+                if self.beta_sigmoid_step:
+                    params.add(f'C_{i}', value=init_params.at['C', 'init_value'], min=init_params.at['C', 'min'], max=init_params.at['C', 'max'], vary=False)
+                    params.add(f'L_{i}', value=init_params.at['L', 'init_value'], min=init_params.at['L', 'min'], max=init_params.at['L', 'max'], vary=True)
+                    params.add(f'a_{i}', value=init_params.at['a', 'init_value'], min=init_params.at['a', 'min'], max=init_params.at['a', 'max'], vary=False)
+                    params.add(f'b_{i}', value=init_params.at['b', 'init_value'], min=init_params.at['b', 'min'], max=init_params.at['b', 'max'], vary=True)
+
+                elif self.beta_linear_step:
+                    params.add(f'w1_{i}', value=init_params.at['w1', 'init_value'], min=init_params.at['w1', 'min'], max=init_params.at['w1', 'max'], vary=True)
+                    params.add(f'w2_{i}', value=init_params.at['w2', 'init_value'], min=init_params.at['w2', 'min'], max=init_params.at['w2', 'max'], vary=True)
+                    params.add(f'b_{i}', value=init_params.at['b', 'init_value'], min=init_params.at['b', 'min'], max=init_params.at['b', 'max'], vary=False)
+
+            #Add gamma
+            params.add('gamma', value=init_params.at['gamma', 'init_value'], min=init_params.at['gamma', 'min'], max=init_params.at['gamma', 'max'], vary=False)
+
+            return params, initial_conditions
+
 
         elif not stringency_fit:
             #Init conditions
@@ -500,7 +570,8 @@ class EPIfit_allcountries():
                         params.add(f'b_{i}', value=init_params.at['b', 'init_value'], min=init_params.at['b', 'min'], max=init_params.at['b', 'max'], vary=True)
 
                     elif self.beta_linear_step:
-                        params.add(f'w_{i}', value=init_params.at['w', 'init_value'], min=init_params.at['w', 'min'], max=init_params.at['w', 'max'], vary=True)
+                        params.add(f'w1_{i}', value=init_params.at['w1', 'init_value'], min=init_params.at['w1', 'min'], max=init_params.at['w1', 'max'], vary=True)
+                        params.add(f'w2_{i}', value=init_params.at['w2', 'init_value'], min=init_params.at['w2', 'min'], max=init_params.at['w2', 'max'], vary=True)
                         params.add(f'b_{i}', value=init_params.at['b', 'init_value'], min=init_params.at['b', 'min'], max=init_params.at['b', 'max'], vary=True)
 
                 if self.beta_constant_step:
@@ -530,7 +601,8 @@ class EPIfit_allcountries():
                         params.add(f'b_{i}', value=init_params.at['b', 'init_value'], min=init_params.at['b', 'min'], max=init_params.at['b', 'max'], vary=True)
 
                     elif self.beta_linear_step:
-                        params.add(f'w_{i}', value=init_params.at['w', 'init_value'], min=init_params.at['w', 'min'], max=init_params.at['w', 'max'], vary=True)
+                        params.add(f'w1_{i}', value=init_params.at['w1', 'init_value'], min=init_params.at['w1', 'min'], max=init_params.at['w1', 'max'], vary=True)
+                        params.add(f'w2_{i}', value=init_params.at['w2', 'init_value'], min=init_params.at['w2', 'min'], max=init_params.at['w2', 'max'], vary=True)
                         params.add(f'b_{i}', value=init_params.at['b', 'init_value'], min=init_params.at['b', 'min'], max=init_params.at['b', 'max'], vary=True)
 
                 if self.beta_constant_step:
@@ -587,6 +659,11 @@ class EPIfit_allcountries():
                 params.add('gamma', value=init_params.at['gamma', 'init_value'], min=init_params.at['gamma', 'min'], max=init_params.at['gamma', 'max'], vary=disease_vary)
 
             return params, initial_conditions
+
+    def callback_func(self, params, iter_, resid, init_conditions, tspan, data, eps, bool):
+        if iter_ != -1:
+            for name in self.dict_training_params.keys():
+                self.dict_training_params[name].append(params[name].value)
 
 
     def error_sectors(self, params, initial_conditions, tspan, data, eps, stringency_fit=False):
@@ -660,7 +737,7 @@ class EPIfit_allcountries():
         elif not test_phase:
             #Add absolute value of dSdt to previous cumulated values
             for i, diff_ in enumerate(diff_i):
-                cumul_i.append(np.abs(diff_)+cumul_i[i]) #round number to next integer (float type)
+                cumul_i.append(np.abs(diff_)+cumul_i[i])
 
             final_sol_ = np.asarray(cumul_i[:])
             #print('final_sol', final_sol)
@@ -1479,7 +1556,28 @@ class EPIfit_allcountries():
             #else:
             #thresh =self.cutoff_date
 
-            #First wave and corresponds to Martin's fit
+            #Stringency
+            data_s = df.loc[0:, ['s']].values
+            data_s = data_s.reshape(len(data_s))
+            data_s_norm = (data_s - data_s.min())/(data_s.max() - data_s.min())
+            #Smooth stringency
+            df['s_norm'] = data_s_norm
+            df['stringency_smooth']= df['s_norm'].rolling(20, center=False).mean().reset_index(0, drop=True).fillna(0.001)
+            s_smooth = df.loc[0:, ['stringency_smooth']].values
+            self.data_s.append(s_smooth.ravel())
+            self.stringency_country = s_smooth
+
+            #Add mobility data
+            if self.beta_linear_step:
+                mobility_df = get_data_w_mobility(self.iso_code2[k])
+                #Merge datasets
+                df = df.merge(mobility_df[['mobility_index','date']], left_on=['date'], right_on=['date'], how='left')
+                df['mobility_index'].bfill(inplace=True) #fill nan
+                df['mobility_index_smooth']= df['mobility_index'].rolling(15, center=False).mean().reset_index(0, drop=True).fillna(0.5)
+                self.data_mob.append(df.loc[0:, ['mobility_index_smooth']].values.ravel())
+                self.mob_country = df.loc[0:, ['mobility_index_smooth']].values.ravel()
+
+            #Crop df
             df = df[0:full_window+1]
             #df = df[df['date'] <= thresh]
             #df = df[df['date'] < str(date.today())]
@@ -1487,9 +1585,6 @@ class EPIfit_allcountries():
             df = self.remove_artefacts(df)
             days = len(df)
             data = df.loc[0:full_window, ['I']].values
-            data_s = df.loc[0:full_window, ['s']].values
-            data_s = data_s.reshape(len(data_s))
-            data_s_norm = (data_s - data_s.min())/(data_s.max() - data_s.min())
             derivative = df.loc[1:full_window, 'dI'].values
 
             #Compute recovered cases
@@ -1501,7 +1596,6 @@ class EPIfit_allcountries():
             #Append country full data and derivative
             self.data.append(data.ravel())
             #self.recovered.append(data_recovered)
-            self.data_s.append(data_s_norm.ravel())
             self.derivative.append(derivative.ravel())
 
             print(f'Fitting {country} data.')
@@ -1576,6 +1670,7 @@ class EPIfit_allcountries():
             #Fit model and find predicted values
             if self.beta_linear_step:
                 result = minimize(self.error_sectors, params, args=(initial_conditions, tspan_train, train_data, eps, False), method='leastsq', full_output = 1)
+
             elif self.beta_constant_step or self.beta_sigmoid_step:
                 #Minimize only the data from the train timespan
                 #print('train data shape ', train_data.shape)
@@ -1583,6 +1678,10 @@ class EPIfit_allcountries():
                 result = minimize(self.error_sectors, params, args=(initial_conditions, tspan_train, train_data, eps, False), method='leastsq', full_output = 1)
             #print(report_fit(result))
             #result.params.pretty_print()
+
+            #Store locally
+            save_to_path ='./{0}/{1}/temp_res/best_result_{2}_{3}days.npy'.format(self.file_method, self.file_model, country, train_window)
+            np.save(save_to_path, result)
 
             #Store for each country
             train_final = train_data + result.residual.reshape(train_data.shape)
@@ -1645,13 +1744,13 @@ class EPIfit_allcountries():
         return self.mse
 
 
-    def plot(self, stringency = False, cases=False, beta_param=False, derivative = False, MSE = False, MSE_norm=False, MAE_norm=False, rate_params = False, STATIC_PLOTS=True):
+    def plot(self, stringency = False, cases=False, beta_param=False, beta_param_linear=False, beta_linear_surface=False, derivative = False, MSE = False, MSE_norm=False, MAE_norm=False, rate_params = False, STATIC_PLOTS=True):
 
         assert len(self.train_fitted) > 1, "The model has not been previously fitted. Please call 'fit' function before."
 
         #tspan_full = [np.arange(1, days+1, 1) for days in self.days]
-        full_window = self.train_window+7
-        train_window = self.train_window
+        full_window = self.split_day+self.train_window+7
+        train_window = self.split_day+self.train_window
         tspan_full = np.arange(1, full_window+1, 1)
         tspan_train = np.arange(1, train_window+1, 1)
         tspan_test = np.arange(train_window, full_window+1, 1)
@@ -1858,6 +1957,115 @@ class EPIfit_allcountries():
                 display(Image(img_bytes))
             fig.show()
 
+
+        elif beta_param_linear:
+            pnames = list((self.train_params[0].valuesdict()))
+
+            b_params = [self.train_params[0][p].value for p in pnames[:3]]
+            beta_curve = self.linear_step(self.data_s[0], self.data_mob[0], b_params)
+            beta_curve_train = self.linear_step(self.data_s[0][self.split_day: train_window], self.data_mob[0][self.split_day: train_window], b_params)
+            beta_curve_test = self.linear_step(self.data_s[0][train_window: full_window], self.data_mob[0][train_window:full_window], b_params)
+
+            fig = make_subplots(rows=10, cols=3, subplot_titles=(self.countries), horizontal_spacing=0.1,
+                    specs=[x*3 for x in [[{"secondary_y": True}]]*10])
+
+            #First subplot
+            fig.add_trace(go.Scatter(x=tspan_train, y=beta_curve_train, mode='markers', name='Transmission rate train',line = dict(dash='dot', color='red')),
+                    row=1, col=1)
+            fig.add_trace(go.Scatter(x=tspan_test, y=beta_curve_test, mode='markers', name='Transmission rate test',line = dict(dash='dot', color='orange')),
+                    row=1, col=1)
+            fig.add_trace(go.Scatter(x=tspan_full, y=self.data_s[0], mode='lines', name='Stringency',line = dict(dash='dot', color='purple')),
+                    row=1, col=1, secondary_y=True)
+
+            fig.update_yaxes(row=1, col=1, secondary_y=True, tickfont=dict(color="blue"))
+
+
+            rows_ = [val for val in range(1,11) for _ in (0, 1, 2)]
+            cols_ = [1,2,3]*10
+
+            for idx, idx_y, i, j in zip(range(2, len(self.data_s)+2), range(3,58,2), rows_[1:-2], cols_[1:-2]):
+                b_params = [self.train_params[idx-1][p].value for p in pnames[:3]]
+                beta_curve = self.linear_step(self.data_s[idx-1], self.data_mob[idx-1], b_params)
+                beta_curve_train = self.linear_step(self.data_s[idx-1][self.split_day: train_window], self.data_mob[idx-1][self.split_day: train_window], b_params)
+                beta_curve_test = self.linear_step(self.data_s[idx-1][train_window: full_window], self.data_mob[idx-1][train_window:full_window], b_params)
+
+
+                #Subplots
+                fig.add_trace(go.Scatter(x=tspan_train, y=beta_curve_train, mode='markers', name='Transmission rate train',line = dict(dash='dot', color='red'), showlegend=False),
+                        row=i, col=j)
+                fig.add_trace(go.Scatter(x=tspan_test, y=beta_curve_test, mode='markers', name='Transmission rate test',line = dict(dash='dot', color='orange'), showlegend=False),
+                        row=i, col=j)
+
+                fig.add_trace(go.Scatter(x=tspan_full, y=self.data_s[idx-1], mode='lines', name='Stringency',
+                                         line = dict(dash='dot', color='purple'), showlegend=False),row=i, col=j, secondary_y=True)
+
+                #Update axis colors and texts
+                fig.update_xaxes(title_text="Days since first infected", row=i, col=j, showgrid=True)
+                fig.update_yaxes(title_text="Level", row=i, col=1, secondary_y=False, titlefont=dict(color="black"),
+                                tickfont=dict(color="black"))
+                fig.update_yaxes(title_text="OxCGRT index", row=i, col=3, secondary_y=True, titlefont=dict(color="blue"),
+                                tickfont=dict(color="blue"))
+                fig.update_yaxes(row=i, col=j, secondary_y=False, tickfont=dict(color="black"))
+                fig.update_yaxes(row=i, col=j, secondary_y=True, tickfont=dict(color="blue"))
+
+
+            fig.update_layout(title='Beta linear curve vs observed stringency',
+                                   xaxis_title='Days since first infected',
+                                   title_x=0.5,
+                                   title_font_size=14,
+                                   font_size=14,
+                                  width=950, height=2600, legend=dict(font_size=14))
+                              #legend=dict(font_size=14, yanchor="top",y=0.99, xanchor="left", x=0.01))
+
+            if STATIC_PLOTS:
+                img_bytes = fig.to_image(format="png")
+                display(Image(img_bytes))
+            fig.show()
+
+
+        elif beta_linear_surface:
+            pnames = list((self.train_params[0].valuesdict()))
+            b_params = [self.train_params[0][p].value for p in pnames[:3]]
+            beta_curve = self.linear_step(self.data_s[0], self.data_mob[0], b_params)
+            b_surface = self.surface_beta(self.data_s[0],self.data_mob[0], b_params)
+            x, y = np.linspace(0, 1, len(beta_curve)), np.linspace(-1, 1, len(beta_curve))
+
+            fig = make_subplots(rows=10, cols=3, subplot_titles=(self.countries), specs = [x*3 for x in [[{"type": 'surface'}]]*10])
+            fig.add_trace(go.Surface(x=x, y=y, z=b_surface, colorscale='RdBu', showscale=True), row=1, col=1)
+            fig.add_scatter3d(x=self.data_s[0], y=self.data_mob[0], z = beta_curve, mode='markers',marker=dict(size=2, colorscale='Greys'))
+
+            rows_ = [val for val in range(1,11) for _ in (0, 1, 2)]
+            cols_ = [1,2,3]*10
+
+            for idx, i, j in zip(range(1, len(self.data)), rows_[1:-1], cols_[1:-1]):
+
+                b_params = [self.train_params[idx][p].value for p in pnames[:3]]
+                beta_curve = self.linear_step(self.data_s[idx], self.data_mob[idx], b_params)
+                b_surface = self.surface_beta(self.data_s[idx],self.data_mob[idx], b_params)
+                x, y = np.linspace(0, 1, len(beta_curve)), np.linspace(-1, 1, len(beta_curve))
+
+                fig.add_trace(go.Surface(x=x, y=y, z=b_surface, colorscale='RdBu', showscale=True),row=i, col=j)
+                fig.add_scatter3d(x=self.data_s[idx], y=self.data_mob[idx], z = beta_curve, mode='markers',marker=dict(size=2, colorscale='Greys'),row=i, col=j)
+
+                #fig.update_xaxes(title_text="Days since first infected", row=i, col=j, showgrid=True)
+                fig.update_yaxes(title_text="Beta value", row=i, col=1)
+
+
+            fig.update_layout(title='Beta fitted (surface plot)'.format(self.model),
+                                   xaxis_title='Stringency',
+                                   yaxis_title='Mobility',
+                                   title_x=0.5,
+                                   title_font_size=14,
+                                   font_size=14,
+                                  width=950, height=2600, legend=dict(font_size=14))
+
+            if STATIC_PLOTS:
+                img_bytes = fig.to_image(format="png")
+                display(Image(img_bytes))
+            else:
+                fig.show()
+
+
         elif MSE:
             #Bar plot of each country mse sorted
             list_mse = self.mse
@@ -2013,3 +2221,518 @@ class EPIfit_allcountries():
                 img_bytes = fig.to_image(format="png")
                 display(Image(img_bytes))
             fig.show()
+
+    def sum_errors(self, country, value_x, value_y, initial_conditions, ground_truth, tspan, sol):
+        #parameters
+        eps=1.0
+        params = Parameters()
+        #init_params = pd.read_csv(self.PARAMS_FILE, sep=";",index_col='name', header=0, skipinitialspace=True)
+        #Init with best fitted params to fix (a, C, gamma)
+        init_params = np.load('./{0}/{1}/temp_res/best_result_{2}_100days.npy'.format(self.file_method, self.file_model, country), allow_pickle=True).item()
+
+        for i in range(1):
+
+            if self.beta_sigmoid_step:
+                params.add(f'C_{i}', value=init_params.params['C_0'].value, vary=False)
+                params.add(f'L_{i}', value=value_x, min=value_x-0.0001, max=value_x+0.001, vary=True)
+                params.add(f'a_{i}', value=init_params.params['a_0'].value, vary=False)
+                params.add(f'b_{i}', value= value_y, min = value_y-0.001, max = value_y+0.001, vary=True)
+
+            elif self.beta_linear_step:
+                params.add(f'w1_{i}', value=value_x, min=value_x-0.0001, max=value_x+0.001, vary=True)
+                params.add(f'w2_{i}', value= value_y, min = value_y-0.001, max = value_y+0.001, vary=True)
+                params.add(f'b_{i}', value=init_params.params['b_0'].value, vary=False)
+
+        #Add gamma
+        params.add('gamma', value=init_params.params['gamma'].value, vary=False)
+
+        predicted = self.ode_solver(tspan, initial_conditions, params, 0)
+
+        #Compute cumulated I cases
+        sol = self.get_cumulated_cases(predicted, 1.0, sol, test_phase=False)
+        test_error = ((sol - ground_truth)/eps).ravel()
+        z = np.sum(test_error**2)/len(test_error)
+
+        return np.sqrt(z)
+
+    def compute_obj_function(self, country, train_window):
+        try:
+            EPI_data, country_attrs = country_covid(country, self.owid_file, self.hosp_file, model=self.model)
+        except ValueError:
+            print(f'incomplete data on {country}')
+            return [], []
+
+        df = EPI_data.drop(['N_effective'], axis=1).reindex(columns=['date', 'S', 'I', 'R', 'D', 's'])
+        df.R.fillna(0, inplace=True)
+        df.ffill(axis=0, inplace=True)
+        df.bfill(axis=0, inplace=True)
+
+        if self.beta_linear_step:
+            #Stringency
+            data_s = df.loc[0:, ['s']].values
+            data_s = data_s.reshape(len(data_s))
+            data_s_norm = (data_s - data_s.min())/(data_s.max() - data_s.min())
+            #Smooth stringency
+            df['s_norm'] = data_s_norm
+            df['stringency_smooth']= df['s_norm'].rolling(20, center=False).mean().reset_index(0, drop=True).fillna(0.001)
+            s_smooth = df.loc[0:, ['stringency_smooth']].values
+            self.data_ = s_smooth.ravel()
+            self.stringency_country = s_smooth
+
+            #Add mobility data
+            k = np.where(np.asarray(self.countries) == country)[0].item()
+            mobility_df = get_data_w_mobility(self.iso_code2[k])
+            #Merge datasets
+            df = df.merge(mobility_df[['mobility_index','date']], left_on=['date'], right_on=['date'], how='left')
+            df['mobility_index'].bfill(inplace=True) #fill nan
+            df['mobility_index_smooth']= df['mobility_index'].rolling(15, center=False).mean().reset_index(0, drop=True).fillna(0.5) # 0.5 means no difference in mobility from previous year
+            self.mob_country = df.loc[0:, ['mobility_index_smooth']].values.ravel()
+
+        #Crop df
+        df = df[0:train_window+1]
+        #Remove artefacts
+        df = self.remove_artefacts(df)
+        data = df.loc[0:train_window-1, ['I']].values
+
+        #Append country full data and derivative
+        true_data = data.ravel()
+
+        #Compute
+        sol = np.zeros_like(true_data)
+        tspan = np.arange(1, train_window+1, 1)
+        initial_conditions = [1, 0, country_attrs['population']]
+
+        #Compute obj function values for couple of parameters
+
+        if self.beta_sigmoid_step:
+            Lmin, Lmax, Lstep = -0.95, 0.0, 0.001
+            bmin, bmax, bstep = 1.0, 100.0, 0.5
+
+            #Get initial value
+            #init_L, init_b = -0.3, 60.0
+            #init_z = self.sum_errors(country, init_L, init_b, initial_conditions, true_data, tspan, sol)
+
+        elif self.beta_linear_step:
+            xmin, xmax, xstep = -1.0, -0.00001, 0.001
+            ymin, ymax, ystep = 0.00001, 1.0, 0.001
+
+        X, Y = np.meshgrid(np.arange(xmin, xmax + xstep, xstep), np.arange(ymin, ymax + ystep, ystep))
+        z_final = np.zeros((X.shape))
+
+        for i in range(X.shape[0]):
+            for j in range(Y.shape[1]):
+                X_temp, Y_temp = X[i][j], Y[i][j]
+                z = self.sum_errors(country, X_temp, Y_temp, initial_conditions, true_data, tspan, sol)
+                z_final[i][j] = z
+
+        #Get fitted values
+        #Import best fitted params for given train window and country
+
+        #save obj function as a tuple
+        np.save('./{0}/{1}/obj_functions/{2}_{3}days.npy'.format(self.file_method, self.file_model, country, train_window), {'obj_func': (X, Y, z_final)})
+
+    def plot_obj_function(self, country, train_window):
+        #Load computed objective function if pre computed
+        try:
+            print(f'Importing file with precomputed objective function for {country} ...')
+            obj_dict = np.load('./res_sigmoid/sir/obj_functions/{0}_{1}days.npy'.format(country, train_window), allow_pickle=True).item()
+        except FileNotFoundError:
+            print(f'File not found. Objective function for {country} is being computed...')
+            self.compute_obj_function(country, train_window)
+            obj_dict = np.load('./res_sigmoid/sir/obj_functions/{0}_{1}days.npy'.format(country, train_window), allow_pickle=True).item()
+
+        L, b, z_final = obj_dict['obj_func'] #obj function values
+        init_L, init_b, init_z = obj_dict['init'] #init values
+        L_fit, b_fit, z_fit = obj_dict['fit'] #fitted values
+
+        #Get minima
+        minima = np.argwhere(z_final == np.amin(z_final))
+        minima_value = [np.amin(z_final).item()]*len(minima)
+        x, y = minima[:,0].item(), minima[:,1].item()
+        L_min, b_min = L[x][y], b[x][y]
+
+        fig = make_subplots(rows=1, cols=1, subplot_titles=([country]), specs = [[{"type": 'surface'}]])
+        fig.add_trace(go.Surface(x=L, y=b, z=z_final, colorscale="bluered", showscale=True, name='Objective function', opacity=0.6), row=1, col=1)
+        fig.add_scatter3d(x=[L_min], y=[b_min], z = minima_value, mode='markers+text', marker=dict(size=4, color='black'),
+                            text='MINIMUM', textfont=dict(size=12, color='black'), showlegend=False)
+        fig.add_scatter3d(x=[init_L], y=[init_b], z = [init_z], mode='markers+text', marker=dict(size=4, color='green'),
+                            text = 'INIT',textfont=dict(size=12, color='black'), showlegend=False)
+        fig.add_scatter3d(x=[L_fit], y=[b_fit], z = [z_fit], mode='markers+text', marker=dict(size=4, color='yellow'),
+                            text = 'FIT',textfont=dict(size=12, color='black'), showlegend=False)
+
+        fig.update_yaxes(title_text="Beta value", row=1, col=1)
+        fig.update_layout(title='Objective function (surface plot) for {0} with {1} model for {2} days'.format(country, self.model, train_window),
+                               xaxis_title='L',
+                               yaxis_title='b',
+                               title_x=0.5,
+                               title_font_size=14,
+                               font_size=14,
+                              width=950, height=800, legend=dict(font_size=14))
+        fig.show()
+
+
+        # Zoom around minimum
+        L_bound = L[max(0, x-100): min(x+100, L.shape[0]), max(0, y-100): min(y+100, L.shape[1])]
+        b_bound = b[max(0, x-100): min(x+100, b.shape[0]), max(0, y-100): min(y+100, b.shape[1])]
+        z_bound = z_final[max(0, x-100): min(x+100, z_final.shape[0]),max(0, y-100): min(y+100, z_final.shape[1])]
+
+        fig = make_subplots(rows=1, cols=1, subplot_titles=([country]), specs = [[{"type": 'surface'}]])
+        fig.add_trace(go.Surface(x=L_bound, y=b_bound, z=z_bound, colorscale="bluered", showscale=True, name='Objective function', opacity=0.6), row=1, col=1)
+        fig.add_scatter3d(x=[L_min], y=[b_min], z = minima_value, mode='markers+text', marker=dict(size=4, color='black'),
+                            text='MINIMUM', textfont=dict(size=12, color='black'), showlegend=False)
+
+        fig.update_layout(title='[ZOOM] Objective function (surface plot) for {0} with {1} model for {2} days'.format(country, self.model, train_window),
+                               xaxis_title='L',
+                               yaxis_title='b',
+                               title_x=0.5,
+                               title_font_size=14,
+                               font_size=14,
+                              width=950, height=800, legend=dict(font_size=14))
+        fig.show()
+
+    """Fitting only 1 country either at random, with initialization at solution or near solution for further investigation of minimization algorithm."""
+    def fit_one_country(self, country, train_window, mode='init_random'):
+        try:
+            results = np.load('./{0}/{1}/result_{2}_{3}days_{4}.npy'.format(self.file_method, self.file_model, country, train_window, mode), allow_pickle=True).item()
+            print('{0} model already fitted for {1} country on {2} days with {3} mode.'.format(self.model, country, train_window, mode))
+
+        except FileNotFoundError:
+            print(f'Fitted parameters not found. Fitting {self.model} for {country} on {train_window} days with {mode}...')
+            try:
+                EPI_data, country_attrs = country_covid(country, self.owid_file, self.hosp_file, model=self.model)
+            except ValueError:
+                print(f'incomplete data on {country}')
+                return [], []
+
+            df = EPI_data.drop(['N_effective'], axis=1).reindex(columns=['date', 'S', 'I', 'R', 'D', 's'])
+            df.R.fillna(0, inplace=True)
+            df.ffill(axis=0, inplace=True)
+            df.bfill(axis=0, inplace=True)
+
+            if self.beta_linear_step:
+                #Stringency
+                data_s = df.loc[0:, ['s']].values
+                data_s = data_s.reshape(len(data_s))
+                data_s_norm = (data_s - data_s.min())/(data_s.max() - data_s.min())
+                #Smooth stringency
+                df['s_norm'] = data_s_norm
+                df['stringency_smooth']= df['s_norm'].rolling(20, center=False).mean().reset_index(0, drop=True).fillna(0.001)
+                s_smooth = df.loc[0:, ['stringency_smooth']].values
+                self.data_ = s_smooth.ravel()
+                self.stringency_country = s_smooth
+
+                #Add mobility data
+                k = np.where(np.asarray(self.countries) == country)[0].item()
+                mobility_df = get_data_w_mobility(self.iso_code2[k])
+                #Merge datasets
+                df = df.merge(mobility_df[['mobility_index','date']], left_on=['date'], right_on=['date'], how='left')
+                df['mobility_index'].bfill(inplace=True) #fill nan
+                df['mobility_index_smooth']= df['mobility_index'].rolling(15, center=False).mean().reset_index(0, drop=True).fillna(0.5) # 0.5 means no difference in mobility from previous year
+                self.mob_country = df.loc[0:, ['mobility_index_smooth']].values.ravel()
+
+            #Crop df
+            self.train_window = train_window
+            full_window = train_window + 7
+            df = df[0:full_window+1]
+            #Remove artefacts
+            df = self.remove_artefacts(df)
+            split_day = 0
+            self.split_day = split_day
+            #SPLIT
+            train_df, test_df = self.train_test_split(df, self.split_day)
+
+            #Keep data
+            train_data = train_df['I'].values
+            test_data = test_df['I'].values
+            self.data = df.loc[0:full_window,'I'].values
+
+            eps=1.0
+            tspan_train = np.arange(1, self.train_window+1+self.split_day, 1)
+
+            sol = np.zeros_like(train_data)
+            tspan_train = np.arange(1, train_window+1, 1)
+            initI, initR, initN = 1.0, 0.0, country_attrs['population']
+            initial_conditions = [initI, initR, initN]
+
+            if mode == 'init_random':
+                print('Fitting with initialization at random...')
+                #get best fitted params on 100 days
+                best_params = np.load('./{0}/{1}/temp_res/best_result_{2}_100days.npy'.format(self.file_method, self.file_model, country), allow_pickle=True).item()
+                path_params_file = self.PARAMS_FILE
+                params = pd.read_csv(path_params_file, sep=";",index_col='name', header=0, skipinitialspace=True)
+                if self.beta_sigmoid_step:
+                    init_X, init_Y = params.at['L', 'init_value'], params.at['b', 'init_value']
+                    init_z = self.sum_errors(country, init_X, init_Y, initial_conditions, train_data, tspan_train, sol)
+                    #Fix best params
+                    params.at['C', 'init_value'] = best_params.params['C_0'].value
+                    params.at['a', 'init_value'] = best_params.params['a_0'].value
+                elif self.beta_linear_step:
+                    init_X, init_Y = params.at['w1', 'init_value'], params.at['w2', 'init_value']
+                    init_z = self.sum_errors(country, init_X, init_Y, initial_conditions, train_data, tspan_train, sol)
+                    #Fix best params
+                    params.at['b', 'init_value'] = best_params.params['b_0'].value
+                #fix gamma
+                params.at['gamma', 'init_value'] = best_params.params['gamma'].value
+                params.to_csv('./params_new/params_countries/params_{0}_{1}_{2}_best.csv'.format(self.file_model, country, self.file_method), sep=";", header=1)
+                self.PARAMS_FILE = './params_new/params_countries/params_{0}_{1}_{2}_best.csv'.format(self.file_model, country, self.file_method)
+
+            else:
+                #Get minimum from obj function
+                #Load computed objective function if pre computed
+                try:
+                    print(f'Importing file with precomputed objective function for {country} ...')
+                    obj_dict = np.load('./{0}/{1}/obj_functions/{2}_{3}days.npy'.format(self.file_method, self.file_model, country, train_window), allow_pickle=True).item()
+                except FileNotFoundError:
+                    print(f'File not found. Objective function for {country} is being computed...')
+                    self.compute_obj_function(country, train_window)
+                    obj_dict = np.load('./{0}/{1}/obj_functions/{2}_{3}days.npy'.format(self.file_method, self.file_model, country, train_window), allow_pickle=True).item()
+
+                X, Y, z_final = obj_dict['obj_func'] #obj function values
+                #Get minima
+                minima = np.argwhere(z_final == np.amin(z_final))
+                minima_value = [np.amin(z_final).item()]*len(minima)
+                x, y = minima[:,0].item(), minima[:,1].item()
+                X_min, Y_min = X[x][y], Y[x][y]
+
+                if mode == 'init_at_sol':
+                    print('Fitting with initialization at solution...')
+                    #Create new csv file with min params for b and L
+                    init_X, init_Y = X_min, Y_min
+                    init_z = minima_value
+                    #Get best params
+                    init_params = pd.read_csv('./params_new/params_countries/params_{0}_{1}_{2}_best.csv'.format(self.file_model, country, self.file_method), sep=";",index_col='name', header=0, skipinitialspace=True)
+                    if self.beta_sigmoid_step:
+                        init_params.at['L', 'init_value'] = X_min
+                        init_params.at['b', 'init_value'] = Y_min
+                    elif self.beta_linear_step:
+                        init_params.at['w1', 'init_value'] = X_min
+                        init_params.at['w2', 'init_value'] = Y_min
+
+                    init_params.to_csv('./params_new/params_countries/params_{0}_{1}_sol_{2}.csv'.format(self.file_model, country, self.file_method), sep=";", header=1)
+                    self.PARAMS_FILE = './params_new/params_countries/params_{0}_{1}_sol_{2}.csv'.format(self.file_model, country, self.file_method)
+
+                elif mode == 'init_near_sol':
+                    print('Fitting with initialization near solution...')
+                    #Near solution
+                    init_params = pd.read_csv('./params_new/params_countries/params_{0}_{1}_{2}_best.csv'.format(self.file_model, country, self.file_method), sep=";",index_col='name', header=0, skipinitialspace=True)
+                    if self.beta_sigmoid_step:
+                        init_X, init_Y = max(X_min+0.1, init_params.at['L', 'max']), min(Y_min+10, init_params.at['b', 'min'])
+
+                    elif self.beta_linear_step:
+                        init_X, init_Y = min(X_min+0.1, init_params.at['w1', 'max']), min(Y_min+0.1, init_params.at['w2', 'min'])
+
+                    init_z =  self.sum_errors(country, init_X, init_Y, initial_conditions, train_data, tspan_train, sol)
+                    #Get best params
+                    init_params = pd.read_csv('./params_new/params_countries/params_{0}_{1}_{2}_best.csv'.format(self.file_model, country, self.file_method), sep=";",index_col='name', header=0, skipinitialspace=True)
+                    if self.beta_sigmoid_step:
+                        init_params.at['L', 'init_value'] = init_X
+                        init_params.at['b', 'init_value'] = init_Y
+                    elif self.beta_linear_step:
+                        init_params.at['w1', 'init_value'] = init_X
+                        init_params.at['w2', 'init_value'] = init_Y
+
+                    init_params.to_csv('./params_new/params_countries/params_{0}_{1}_nearsol_{2}.csv'.format(self.file_model, country, self.file_method), sep=";", header=1)
+                    self.PARAMS_FILE = './params_new/params_countries/params_{0}_{1}_nearsol_{2}.csv'.format(self.file_model, country, self.file_method)
+
+            #Next
+            self.last_I_cumul = initI
+            self.test_on_optim = True
+            params, initial_conditions = self.init_sectors([100.0], disease_vary=True, initN=initN, initI=initI, initR=initR, stringency_fit=False)
+            #Minimization
+            if self.beta_sigmoid_step:
+                self.dict_training_params = {i : [] for i in ['L_0', 'b_0']}
+            elif self.beta_linear_step:
+                self.dict_training_params = {i : [] for i in ['w1_0', 'w2_0']}
+
+            result = minimize(self.error_sectors, params, args=(initial_conditions, tspan_train, train_data, eps, False), iter_cb = self.callback_func, method='leastsq', full_output = 1)
+            train_final = train_data + result.residual.reshape(train_data.shape)
+            #print(report_fit(result))
+            if self.beta_sigmoid_step:
+                X_fit = result.params['L_0'].value
+                Y_fit = result.params['b_0'].value
+            elif self.beta_linear_step:
+                X_fit = result.params['w1_0'].value
+                Y_fit = result.params['w2_0'].value
+            fit_z = self.sum_errors(country, X_fit, Y_fit, initial_conditions[0], train_data, tspan_train, sol)
+
+            #Compute obj function for every parameter pairs visited in the gradient descent
+            if self.beta_sigmoid_step:
+                training_z = [self.sum_errors(country, train_X, train_Y, initial_conditions[0], train_data, tspan_train, sol) for train_X, train_Y in zip(self.dict_training_params['L_0'], self.dict_training_params['b_0'])]
+            elif self.beta_linear_step:
+                training_z = [self.sum_errors(country, train_X, train_Y, initial_conditions[0], train_data, tspan_train, sol) for train_X, train_Y in zip(self.dict_training_params['w1_0'], self.dict_training_params['w2_0'])]
+
+            ####TESTING
+            self.last_I, self.last_R, self.last_N =initial_conditions[0]
+            self.last_I_cumul = self.data[self.train_window-1].item()
+            sol = np.zeros_like(test_data)
+            tspan_test = np.arange(1, self.split_day+full_window+1, 1)
+            params_fitted = result.params
+            if self.model=='SIR':
+                initial_conditions_test = [self.last_I, self.last_R, self.last_N]
+            elif self.model=='SEIR':
+                initial_conditions_test = [self.last_E, self.last_I, self.last_R, self.last_N]
+
+            predicted = self.ode_solver(tspan_test, initial_conditions_test, params_fitted, 0)
+            #Compute cumulated I cases
+            test_final = self.get_cumulated_cases(predicted, self.last_I_cumul, sol, test_phase=True)
+            #test_error = ((sol_test - test_data)/eps).ravel()
+            save_to_path = './{0}/{1}/result_{2}_{3}days_{4}.npy'.format(self.file_method, self.file_model, country, train_window, mode)
+            np.save(save_to_path,  {'init': (init_X, init_Y, init_z), 'fit': (X_fit, Y_fit, fit_z), 'result':result, 'train_fit': train_final.ravel(), 'test': test_final.ravel(), 'true_data':self.data.ravel(), 'training_obj_func': (training_z, self.dict_training_params)})
+
+    """Function to plot 4 subplots to inverstigate the minimization process. 2 contour plots, 1 convergence plot and 1 plot of the final fit."""
+    def subplots_obj_func(self, country, train_window, mode='init_random'):
+        #Import fit or compute it
+        try:
+            results = np.load('./{0}/{1}/result_{2}_{3}days_{4}.npy'.format(self.file_method, self.file_model, country, train_window, mode), allow_pickle=True).item()
+        except FileNotFoundError:
+            self.fit_one_country(country, train_window, mode)
+            results = np.load('./{0}/{1}/result_{2}_{3}days_{4}.npy'.format(self.file_method, self.file_model, country, train_window, mode), allow_pickle=True).item()
+
+        #Load computed objective function if pre computed
+        try:
+            print(f'Importing file with precomputed objective function for {country} ...')
+            obj_dict = np.load('./{0}/{1}/obj_functions/{2}_{3}days.npy'.format(self.file_method, self.file_model, country, train_window), allow_pickle=True).item()
+        except FileNotFoundError:
+            print(f'File not found. Objective function for {country} is being computed...')
+            self.compute_obj_function(country, train_window)
+            obj_dict = np.load('./{0}/{1}/obj_functions/{2}_{3}days.npy'.format(self.file_method, self.file_model, country, train_window), allow_pickle=True).item()
+
+        X, Y, z_final = obj_dict['obj_func'] #obj function values
+        #Get minima
+        minima = np.argwhere(z_final == np.amin(z_final))
+        minima_value = [np.amin(z_final).item()]*len(minima)
+        x, y = minima[:,0].item(), minima[:,1].item()
+        X_min, Y_min = X[x][y], Y[x][y]
+
+        #Get fitted and init values for each fit
+        X_init, Y_init, z_init = results['init']
+        X_fit, Y_fit, z_fit = results['fit']
+
+        #Get fitted cases and predictions
+        true_data = results['true_data']
+        train_fit, test = results['train_fit'], results['test']
+        tspan_train = np.arange(1, train_window+1, 1)
+        tspan_test = np.arange(train_window+1, train_window+7+1, 1)
+        tspan_full = np.arange(1, train_window+7+1, 1)
+
+        #Get intermediary points
+        training_z, training_params = results['training_obj_func']
+        if self.beta_sigmoid_step:
+            X0 = np.asarray([training_params['L_0']])
+            Y0 = np.asarray([training_params['b_0']])
+        elif self.beta_linear_step:
+            X0 = np.asarray([training_params['w1_0']])
+            Y0 = np.asarray([training_params['w2_0']])
+        path = np.concatenate((X0, Y0), axis=0)
+
+        # Zoom around minimum
+        #L_bound = L[max(0, x-10): min(x+10, L.shape[0]), max(0, y-10): min(y+10, L.shape[1])]
+        #b_bound = b[max(0, x-10): min(x+10, b.shape[0]), max(0, y-10): min(y+10, b.shape[1])]
+        X_bound = X[0,:][int(max(0, y-80)) : int(min(y+80, len(X[0,:])-1))]
+        Y_bound = Y[:,0][int(max(0, x-15)) : int(min(x+15, len(Y[:,0])-1))]
+        z_bound = z_final[int(max(0, x-15)): int(min(x+15, z_final.shape[0])), int(max(0, y-80)): int(min(y+80, z_final.shape[1]))]
+
+        #List of points inside the bounds
+        path_bound = []
+        for i in range(len(path[0,])):
+            x_, y_ = path[:,i]
+            if X_bound.min() <= x_ <= X_bound.max() and Y_bound.min() <= y_ <= Y_bound.max():
+                path_bound.append([x_, y_])
+
+        #cbarlocs = [.85, .25]
+        #Subplots
+        ####SURFACE PLOT
+        fig = make_subplots(rows=2, cols=2, subplot_titles=(['Minimization [log scale]', '[ZOOM] Minimum', 'Convergence and minimum (red)', 'Fit result']))
+        #fig.add_trace(go.Surface(x=L, y=b, z=z_final, colorscale="bluered", showscale=False, name='Objective function', opacity=0.6), row=1, col=1)
+        #fig.add_scatter3d(x=[L_min], y=[b_min], z = minima_value, mode='markers+text', marker=dict(size=4, color='black'),
+        #                    text='MINIMUM', textfont=dict(size=12, color='black'), showlegend=False, row=1, col=1)
+        #fig.add_scatter3d(x=[L_init], y=[b_init], z = [z_init], mode='markers+text', marker=dict(size=4, color='green'),
+        #                    text = 'INIT',textfont=dict(size=12, color='black'), showlegend=False, row=1, col=1)
+        #fig.add_scatter3d(x=[L_fit], y=[b_fit], z = [z_fit], mode='markers+text', marker=dict(size=4, color='yellow'),
+                #            text = 'FIT',textfont=dict(size=12, color='black'), showlegend=False, row=1, col=1)
+
+        #add intermediary points
+        #for train_z, train_L, train_b in zip(training_z, training_params['L_0'], training_params['b_0']):
+            #fig.add_scatter3d(x=[train_L], y=[train_b], z = [train_z], mode='markers', marker=dict(size=2, color='blue'),
+                                #textfont=dict(size=12, color='black'), showlegend=False, row=1, col=1)
+
+        #2nd subplot:zoom
+        #fig.add_trace(go.Surface(x=L_bound, y=b_bound, z=z_bound, colorscale="bluered", showscale=True, name='Objective function', opacity=0.6), row=1, col=2)
+        #fig.add_scatter3d(x=[L_min], y=[b_min], z = minima_value, mode='markers+text', marker=dict(size=4, color='black'),
+                            #text='MINIMUM', textfont=dict(size=12, color='black'), showlegend=False, row=1, col=2)
+
+        #fig.update_yaxes(title_text="RMSE", row=1, col=1)
+        #fig.update_yaxes(title_text="RMSE", row=1, col=2)
+
+        contour_colorscale = [[0.0, "rgb(49,54,149)"],
+[0.1111111111111111, "rgb(69,117,180)"],
+[0.2222222222222222, "rgb(116,173,209)"],
+[0.3333333333333333, "rgb(171,217,233)"],
+[0.4444444444444444, "rgb(224,243,248)"],
+[0.5555555555555556, "rgb(254,224,144)"],
+[0.6666666666666666, "rgb(253,174,97)"],
+[0.7777777777777778, "rgb(244,109,67)"],
+[0.8888888888888888, "rgb(215,48,39)"],
+[1.0, "rgb(165,0,38)"]]
+
+        #1st contour subplot
+        fig.add_trace(go.Contour(z=np.log(z_final), x=X[0,:], y=Y[0:,0], colorscale=contour_colorscale, showscale=True, showlegend=False, opacity=1,
+        colorbar=dict(nticks=10, ticks='outside', ticklen=5, tickwidth=1,showticklabels=True, tickangle=0, tickfont_size=12, len=0.5, title = 'log-RMSE')), row=1, col=1)
+        #Add gradient descent
+        fig.add_trace(go.Scatter(x=path[0,:-1], y=path[1,:-1], name='Path', mode='lines+markers',marker_symbol =46,
+        marker_size=10, marker_color='black', line = dict(dash='dot', color='black'),showlegend=True), row=1, col=1)
+        #add minimum, init and fit
+        fig.add_scatter(x=[X_min], y=[Y_min], mode='markers',name = 'Minimum', marker=dict(size=8, color='red'), marker_symbol='star',  marker_size=15,
+                             showlegend=True, row=1, col=1)
+        fig.add_scatter(x=[X_init], y=[Y_init], mode='markers', name = 'Init', marker=dict(size=8, color='green'), marker_symbol='star', marker_size=15,
+                            showlegend=True, row=1, col=1)
+        fig.add_scatter(x=[X_fit], y=[Y_fit], mode='markers', name = 'Fit', marker=dict(size=8, color='yellow'),  marker_symbol='star', marker_size=15,
+                             showlegend=True, row=1, col=1)
+        fig.update_xaxes(title_text="x", row=1, col=1, showgrid=True)
+        fig.update_yaxes(title_text="y", row=1, col=1)
+
+        #2nd subplot : zoom on contour plot
+        fig.add_trace(go.Contour(z=np.log(z_bound), x=X_bound, y=Y_bound, colorscale=contour_colorscale, showscale=False, showlegend=False, opacity=1,
+        colorbar=dict(nticks=10, ticks='outside', ticklen=5, tickwidth=1,showticklabels=True, tickangle=0, tickfont_size=12, len=0.5)), row=1, col=2)
+        #Add gradient descent
+
+        if len(path_bound) >= 1:
+            fig.add_trace(go.Scatter(x=np.asarray(path_bound).T[0,:-1], y=np.asarray(path_bound).T[1,:-1], name='Path', mode='lines+markers',marker_symbol =46, marker_size=15, marker_color='black',
+                                    line = dict(dash='dot', color='black'), showlegend=False), row=1, col=2)
+        #add minimum, init and fit only if inside bounds
+        fig.add_scatter(x=[X_min], y=[Y_min], mode='markers', marker=dict(size=8, color='red'),marker_symbol='star', marker_size=15,
+                            showlegend=False, row=1, col=2)
+        if X_bound.min() <= X_init <= X_bound.max() and Y_bound.min() <= Y_init <= Y_bound.max():
+            fig.add_scatter(x=[X_init], y=[Y_init], mode='markers', marker=dict(size=8, color='green'),marker_symbol='star',  marker_size=15,
+                                 showlegend=False, row=1, col=2)
+        if X_bound.min() <=X_fit <= X_bound.max() and Y_bound.min() <= Y_fit <= Y_bound.max():
+            fig.add_scatter(x=[X_fit], y=[Y_fit], mode='markers', marker=dict(size=8, color='yellow'),marker_symbol='star', marker_size=15,
+                                 showlegend=False, row=1, col=2)
+        fig.update_xaxes(title_text="x", row=1, col=2, showgrid=True)
+
+        #3rd Subplot: convergence over iterations
+        iterations = np.arange(1, len(training_z), 1)
+        fig.add_trace(go.Scatter(x=iterations, y=np.log(training_z), mode='lines', name='Training RMSE',line = dict(color='black'), showlegend=False),
+                row=2, col=1)
+        fig.add_trace(go.Scatter(x=iterations, y=[np.log(np.amin(z_final).item())]*len(iterations), mode='lines', name='Minimum',line = dict(dash='dot', color='red'), showlegend=False),
+                row=2, col=1)
+        fig.update_xaxes(title_text="Iterations", row=2, col=1, showgrid=True)
+        fig.update_yaxes(title_text="Log-RMSE", row=2, col=1)
+
+        #4th plot
+        fig.add_trace(go.Scatter(x=tspan_full, y=true_data, mode='markers', name='Observed Infections',line = dict(dash='dot', color='black'), showlegend=False),
+                row=2, col=2)
+        fig.add_trace(go.Scatter(x=tspan_train, y=train_fit, mode='lines+markers', name='Fitted Infections',line = dict(dash='dot', color='red'), showlegend=False),
+                  row=2, col=2)
+        fig.add_trace(go.Scatter(x=tspan_test, y=test, mode='lines+markers', name='Predicted Infections',line = dict(dash='dot', color='orange'), showlegend=False),
+                            row=2, col=2)
+        fig.update_xaxes(title_text="Days since first infected", row=2, col=2, showgrid=True)
+        fig.update_yaxes(title_text="Count", row=2, col=2)
+
+
+        fig.update_layout(title='{0} model for {1} on {2} days'.format(self.model,country, train_window),
+                               title_x=0.5,
+                               title_font_size=14,
+                               font_size=14,
+                              width=950, height=700, legend=dict(font_size=14))
+        fig.show()
