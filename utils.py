@@ -6,6 +6,7 @@ import os
 import requests
 from datetime import date
 import glob
+from zipfile import ZipFile
 
 # Easy interactive plots
 import plotly.graph_objects as go
@@ -140,25 +141,25 @@ def country_covid(country, owid_file, hosp_file='', model='SIR'):
         covid_data['N_effective'] = country_attrs['population'] - covid_data['D']
         covid_data.bfill(axis=0, inplace=True)
 
-    # France case with hospital data
-    elif code == 'FRA' and hosp_file != '':
-        hosp_database = hospitalieres_summary(hosp_file)
-        # Fix date notation
-        hosp_database.date = hosp_database.date.apply(lambda s: datefy(s))
-        # Mean date duplicates
-        hosp_database = hosp_database.groupby(by='date', as_index=False).mean()
-        covid_data = hosp_database.merge(covid_data, on='date', how='outer')
-        covid_data = covid_data.sort_values(by='date')
-        covid_data = covid_data.reset_index(drop=True)
-        # Oldest EPI values are all 0 (I, R, D)
-        covid_data.loc[0, covid_data.columns != 'date'] = covid_data.loc[0, covid_data.columns != 'date'].apply(lambda x: 0)
-        # Forward-fill NaN: old value is maintained until not-NaN value
-        covid_data.ffill(axis=0, inplace=True)
-        # Rename columns
-        covid_data.columns = ['date', 'H', 'Reanimation', 'R', 'I', 'D', 's']
-        # Compute S
-        covid_data['S'] = country_attrs['population'] - covid_data['I'] - covid_data['D'] - covid_data['H'] - covid_data['Reanimation']
-    # general country
+        # France case with hospital data
+        """elif code == 'FRA' and hosp_file != '':
+            hosp_database = hospitalieres_summary(hosp_file)
+            # Fix date notation
+            hosp_database.date = hosp_database.date.apply(lambda s: datefy(s))
+            # Mean date duplicates
+            hosp_database = hosp_database.groupby(by='date', as_index=False).mean()
+            covid_data = hosp_database.merge(covid_data, on='date', how='outer')
+            covid_data = covid_data.sort_values(by='date')
+            covid_data = covid_data.reset_index(drop=True)
+            # Oldest EPI values are all 0 (I, R, D)
+            covid_data.loc[0, covid_data.columns != 'date'] = covid_data.loc[0, covid_data.columns != 'date'].apply(lambda x: 0)
+            # Forward-fill NaN: old value is maintained until not-NaN value
+            covid_data.ffill(axis=0, inplace=True)
+            # Rename columns
+            covid_data.columns = ['date', 'H', 'Reanimation', 'R', 'I', 'D', 's']
+            # Compute S
+            covid_data['S'] = country_attrs['population'] - covid_data['I'] - covid_data['D'] - covid_data['H'] - covid_data['Reanimation']"""
+        # general country
     else:
         covid_data = covid_data.sort_values(by='date')
         covid_data = covid_data.reset_index(drop=True)
@@ -170,12 +171,12 @@ def country_covid(country, owid_file, hosp_file='', model='SIR'):
         covid_data.columns = ['date', 'I', 'D', 's']
         # Compute S
         covid_data['S'] = country_attrs['population'] - covid_data['I'] - covid_data['D']
-    covid_data = covid_data[covid_data['I'] > 0]
-    covid_data.reset_index(drop=True, inplace=True)
-    covid_data['N_effective'] = country_attrs['population'] - covid_data['D']
-#     covid_data['beta'] = -covid_data['N_effective'] * covid_data['S'].diff() / (covid_data['I'] * covid_data['S'])
-#     covid_data['mu'] = covid_data['D'].diff() / covid_data['I']
-    covid_data.bfill(axis=0, inplace=True)
+        covid_data = covid_data[covid_data['I'] > 0]
+        covid_data.reset_index(drop=True, inplace=True)
+        covid_data['N_effective'] = country_attrs['population'] - covid_data['D']
+    #     covid_data['beta'] = -covid_data['N_effective'] * covid_data['S'].diff() / (covid_data['I'] * covid_data['S'])
+    #     covid_data['mu'] = covid_data['D'].diff() / covid_data['I']
+        covid_data.bfill(axis=0, inplace=True)
 
     return covid_data, country_attrs
 
@@ -193,6 +194,50 @@ def save_res_local(res=None):
     df_result= pd.DataFrame(data=r)
     #Save to csv
     df_result.to_csv('results_fitted_france.csv')
+
+# get mobility
+def get_mobility(path):
+    mobility_df = pd.read_csv(path)
+    #Drop non useful information
+    mobility_df.drop(['sub_region_1','sub_region_2', 'metro_area', 'iso_3166_2_code','census_fips_code', 'place_id'], axis=1, inplace=True)
+    #Rename column of countries
+    mobility_df = mobility_df.rename(columns={'country_region': 'CountryName'})
+    #Drop duplicates in dates
+    mobility_df = mobility_df.drop_duplicates(subset=['CountryName','date'], keep='first', ignore_index=True)
+    return mobility_df
+
+def get_data_w_mobility(iso_code2='None'):
+    MOBILITY_COLUMNS=['retail_and_recreation_percent_change_from_baseline',
+            'grocery_and_pharmacy_percent_change_from_baseline',
+            'parks_percent_change_from_baseline',
+            'transit_stations_percent_change_from_baseline',
+            'workplaces_percent_change_from_baseline',
+            'residential_percent_change_from_baseline']
+
+    zip_ = ZipFile('Region_Mobility_Report_CSVs.zip', 'r')
+    file_to_extract1 = '2020_{}_Region_Mobility_Report.csv'.format(iso_code2)
+    file_to_extract2 = '2021_{}_Region_Mobility_Report.csv'.format(iso_code2)
+    zip_.extract(file_to_extract1, path='./temp_mobility')
+    zip_.extract(file_to_extract2, path='./temp_mobility')
+
+    mobility_df1 = get_mobility('./temp_mobility/'+file_to_extract1)
+    mobility_df2 = get_mobility('./temp_mobility/'+file_to_extract2)
+
+    mobility_df = pd.concat([mobility_df1, mobility_df2], ignore_index=True)
+    mob_data =  mobility_df[MOBILITY_COLUMNS].values.sum(axis=1)
+    #Normalize between 0 and 1
+    mob_data_norm = (mob_data - mob_data.min())/(mob_data.max() - mob_data.min())
+    #mob_data_norm = 2*(mob_data - mob_data.min())/(mob_data.max() - mob_data.min()) -1
+
+    mobility_df['mobility_index'] = mob_data_norm
+
+    mobility_df.drop(MOBILITY_COLUMNS+['country_region_code', 'CountryName'], axis=1, inplace=True)
+
+    #remove temporary files
+    os.remove('./temp_mobility/'+file_to_extract1)
+    os.remove('./temp_mobility/'+file_to_extract2)
+
+    return mobility_df
 
 ## PLOTS
 def plot_dualaxis(x, y1, y2, namesy1, namesy2, title='', log_y2=False, static=False, xtitle='Day'):
